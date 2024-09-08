@@ -1,0 +1,440 @@
+import json
+import xml.etree.ElementTree as ET
+import uuid
+from urllib.parse import urlparse, urlunparse
+
+
+
+def create_soapui_project(name):
+    """
+    Create a new SoapUI project XML element with the given name.
+    """
+    project = ET.Element("con:soapui-project", {
+        "id": str(uuid.uuid4()),  # Unique identifier for the project
+        "name": name,  # Name of the project
+        "resourceRoot": "",
+        "soapui-version": "5.7.0",  # SoapUI version
+        "activeEnvironment": "Default",  # Default environment
+        "abortOnError": "false",  # Do not abort on error
+        "runType": "SEQUENTIAL",  # Run type for the project
+        "xmlns:con": "http://eviware.com/soapui/config",  # Namespace
+        "xmlns:xsi": "http://www.w3.org/2001/XMLSchema-instance"  # XML Schema namespace
+    })
+    return project
+
+
+def add_rest_service(project, service_name):
+    """
+    Add a REST service to the SoapUI project.
+    """
+    rest_service = ET.SubElement(project, "con:restService", {
+        "name": service_name  # Name of the REST service
+    })
+    return rest_service
+
+
+def add_resource(rest_service, resource_name, full_path, query_params):
+    """
+    Add a resource to a REST service in the SoapUI project.
+    """
+    resource = ET.SubElement(rest_service, "con:resource", {
+        "name": resource_name,  # Name of the resource
+        "path": full_path  # Path of the resource
+    })
+
+    # Add <con:settings /> block
+    ET.SubElement(resource, "con:settings")
+
+    # Add <con:parameters> block with <con:parameter>
+    parameters = ET.SubElement(resource, "con:parameters")
+
+    if query_params:
+        for param in query_params:
+            parameter = ET.SubElement(parameters, "con:parameter")
+            ET.SubElement(parameter, "con:name").text = param['key']  # Dynamic key
+            ET.SubElement(parameter, "con:value")
+            ET.SubElement(parameter, "con:style").text = "QUERY"  # Assuming QUERY as the style for all
+            ET.SubElement(parameter, "con:default")
+            ET.SubElement(parameter, "con:description", {"xsi:nil": "true"})  # Fixed xsi:nil usage
+
+    return resource
+
+
+def add_method(resource, method_name, method_type):
+    """
+    Add a method (GET, POST, etc.) to a resource in the SoapUI project.
+    """
+    method = ET.SubElement(resource, "con:method", {
+        "name": method_name,  # Name of the method
+        "method": method_type  # HTTP method type (GET, POST, etc.)
+    })
+    return method
+
+
+def extract_bearer_token(request):
+    """
+   Extract Bearer token from the request.
+   """
+    auth = request.get('auth', {})
+    # Check if the auth type is bearer
+    if auth.get('type') == 'bearer':
+        # Extract bearer token information from the 'bearer' list
+        bearer_info = auth.get('bearer', [])
+        if isinstance(bearer_info, list) and len(bearer_info) > 0:
+            token_entry = bearer_info[0]  # Access the first element of the list
+            return token_entry.get('value')  # Extract the token value
+    return None
+
+def add_interface_request(method, base_url, headers, query_params, body=None, media_type=None):
+    """
+    Add a request to an interface method in the SoapUI project.
+    """
+    request = ET.SubElement(method, "con:request", {
+        "name": "Request 1",  # Default name for the request
+        "mediaType": media_type or "application/json",  # Default media type
+        "id": str(uuid.uuid4())  # Unique identifier for the request
+    })
+
+    settings = ET.SubElement(request, "con:settings")
+    setting = ET.SubElement(settings, "con:setting", {
+        "id": "com.eviware.soapui.impl.wsdl.WsdlRequest@request-headers"
+    })
+
+    # Add headers
+    if headers:
+        header_fragment = "&lt;xml-fragment xmlns:con=\"http://eviware.com/soapui/config\"&gt;&#13;"
+        for header in headers:
+            header_fragment += f"&lt;con:entry key=\"{header['key']}\" value=\"{header['value']}\"/&gt;&#13;"
+        header_fragment += "&lt;/xml-fragment&gt;"
+        setting.text = header_fragment
+
+    ET.SubElement(request, "con:endpoint").text = base_url
+
+    # Handle Basic Auth
+    credentials = ET.SubElement(request, "con:credentials")
+    auth_type = "No Authorization"
+    for header in headers:
+        if header["key"].lower() == "authorization":
+            if header["value"].startswith("Basic "):
+                import base64
+                encoded_credentials = header["value"][6:]  # Remove "Basic " prefix
+                decoded_credentials = base64.b64decode(encoded_credentials).decode('utf-8')
+                username, password = decoded_credentials.split(":", 1)
+                ET.SubElement(credentials, "con:username").text = username
+                ET.SubElement(credentials, "con:password").text = password
+                ET.SubElement(credentials, "con:selectedAuthProfile").text = "Basic"
+                ET.SubElement(credentials, "con:addedBasicAuthenticationTypes").text = "Basic"
+                auth_type = "Basic"
+                break
+
+    ET.SubElement(request, "con:authType").text = auth_type
+
+    if method.get('method') in ['POST', 'PUT'] and body:
+        if media_type and "json" in media_type.lower():
+            ET.SubElement(request, "con:request").text = body
+        else:
+            request_body = ET.SubElement(request, "con:requestBody")
+            request_body.text = body
+
+    # Add parameters
+    if query_params:
+        parameters = ET.SubElement(request, "con:parameters")
+        for param in query_params:
+            ET.SubElement(parameters, "entry", {
+                "key": param["key"],
+                "value": param["value"],
+                "xmlns": "http://eviware.com/soapui/config"
+            })
+
+        param_order = ET.SubElement(request, "con:parameterOrder")
+        for param in query_params:
+            ET.SubElement(param_order, "con:entry").text = param["key"]
+
+    return request
+
+
+def add_interface(project, base_url):
+    interface = ET.SubElement(project, "con:interface", {
+        "xmlns:xsi": "http://www.w3.org/2001/XMLSchema-instance",
+        "xsi:type": "con:RestService",
+        "id": str(uuid.uuid4()),
+        "wadlVersion": "http://wadl.dev.java.net/2009/02",
+        "name": base_url,
+        "type": "rest"
+    })
+
+    ET.SubElement(interface, "con:settings")
+    ET.SubElement(interface, "con:definitionCache", {
+        "type": "TEXT",
+        "rootPart": ""
+    })
+
+    endpoints = ET.SubElement(interface, "con:endpoints")
+    endpoint = ET.SubElement(endpoints, "con:endpoint")
+    endpoint.text = base_url
+
+    return interface
+
+
+def add_interface_resource(interface, path, query_params):
+    resource = ET.SubElement(interface, "con:resource", {
+        "name": "Get",
+        "path": path,
+        "id": str(uuid.uuid4())
+    })
+    ET.SubElement(resource, "con:settings")
+
+    # Add parameters at the resource level (for query params)
+    parameters = ET.SubElement(resource, "con:parameters")
+    for param in query_params:
+        parameter = ET.SubElement(parameters, "con:parameter")
+        ET.SubElement(parameter, "con:name").text = param['key']
+        ET.SubElement(parameter, "con:value")
+        ET.SubElement(parameter, "con:style").text = "QUERY"
+        ET.SubElement(parameter, "con:default")
+        ET.SubElement(parameter, "con:description", {"xsi:nil": "true"})
+
+    return resource
+
+
+def add_interface_method(resource, method_name, method_type):
+    method = ET.SubElement(resource, "con:method", {
+        "name": f"{method_name} 1",
+        "method": method_type,
+        "id": str(uuid.uuid4())
+    })
+    ET.SubElement(method, "con:settings")
+    ET.SubElement(method, "con:parameters")
+    return method
+
+def add_request(method_element, request_name, full_url, method, headers, query_params, body, media_type, auth_type, auth_info):
+    """
+    Add a request element to a method element in the SoapUI project.
+
+    Parameters:
+        method_element (Element): The XML element for the method to which the request will be added.
+        request_name (str): Name of the request.
+        full_url (str): Full URL including query parameters.
+        method (str): HTTP method (GET, POST, etc.).
+        headers (list): List of headers for the request.
+        query_params (list): List of query parameters for the request.
+        body (str): Request body, if present.
+        media_type (str): Media type for the request (e.g., application/json).
+        auth_type (str): Type of authorization (Basic, Bearer, etc.).
+        auth_info (dict): Dictionary containing authentication details.
+
+    Returns:
+        Element: The XML element for the request.
+    """
+
+    # Extract the endpoint URL
+    endpoint = full_url.split('?')[0]  # Exclude query parameters for endpoint URL
+    parsed_url = urlparse(full_url)
+
+    # Construct the hostname
+    hostname = urlunparse((
+        parsed_url.scheme,
+        parsed_url.netloc,
+        '',
+        '',
+        '',
+        ''
+    ))
+
+    # Extract the resource name (path)
+    resource_name = parsed_url.path
+    if not resource_name:
+        resource_name = '/'
+
+
+    # Create request element with media type
+    request_element = ET.SubElement(method_element, 'con:request', {
+        'name': request_name,
+        'mediaType': media_type or "application/json"
+    })
+
+    # Add request body if present
+    if body:
+        request_body = ET.SubElement(request_element, 'con:request')
+        request_body.text = body
+
+    # Add the endpoint
+    ET.SubElement(request_element, 'con:endpoint').text = hostname
+    ET.SubElement(request_element, 'con:resource').text = resource_name
+
+    # Add headers to the request element if headers are present
+    if headers:
+        header_setting = '<xml-fragment xmlns:con="http://eviware.com/soapui/config">'
+        for header in headers:
+            header_setting += f'<con:entry key="{header["key"]}" value="{header["value"]}" />'
+        header_setting += '</xml-fragment>'
+        settings = ET.SubElement(request_element, 'con:settings')
+        ET.SubElement(settings, 'con:setting', {'id': 'com.eviware.soapui.impl.wsdl.WsdlRequest@request-headers'}).text = header_setting
+
+    # Add authentication details if present
+    if auth_type != "No Authorization":
+        credentials = ET.SubElement(request_element, 'con:credentials')
+        if auth_type == "Basic":
+            ET.SubElement(credentials, 'con:username').text = auth_info['basic'][1]['value']  # Extracted username
+            ET.SubElement(credentials, 'con:password').text = auth_info['basic'][0]['value']  # Extracted password
+            ET.SubElement(credentials, 'con:selectedAuthProfile').text = 'Basic'
+            ET.SubElement(credentials, 'con:addedBasicAuthenticationTypes').text = 'Basic'
+        elif auth_type == "Bearer":
+            # For Bearer token, no specific handling is done here
+            pass
+
+    # Add query parameters if present
+    if query_params:
+        parameters = ET.SubElement(request_element, 'con:parameters')
+        for param in query_params:
+            ET.SubElement(parameters, 'entry', {
+                'key': param['key'],  # Parameter key
+                'value': param.get('value', ''),  # Parameter value (default to empty string if not provided)
+                'xmlns': 'http://eviware.com/soapui/config'  # Namespace
+            })
+
+    return request_element
+
+
+def convert_postman_to_soapui(postman_json):
+    """
+   Convert a Postman collection JSON file to a SoapUI project XML format.
+
+   Parameters:
+       postman_json (str): Path to the Postman collection JSON file.
+
+   Returns:
+       ElementTree: The XML tree of the converted SoapUI project.
+   """
+    with open(postman_json, 'r') as file:
+        postman_data = json.load(file) # Load Postman data from JSON file
+
+    project_name = postman_data['info']['name'] # Extract the project name from Postman data
+
+    # Create the root element of the SoapUI project
+    soapui_project = ET.Element('con:soapui-project', {
+        'id': str(uuid.uuid4()),  # Generate a unique ID for the project
+        'name': project_name,  # Set the name of the project
+        'soapui-version': "5.7.0",  # Specify the SoapUI version
+        'activeEnvironment': "Default",  # Default environment
+        'abortOnError': "false",  # Do not abort on error
+        'runType': "SEQUENTIAL",  # Set run type
+        'xmlns:con': "http://eviware.com/soapui/config",  # Namespace
+        'xmlns:xsi': "http://www.w3.org/2001/XMLSchema-instance"  # XML Schema namespace
+    })
+
+    # Build the interface element
+    base_url = postman_data['item'][0]['request']['url']['protocol'] + "://" + ".".join(
+        postman_data['item'][0]['request']['url']['host'])
+    interface = ET.SubElement(soapui_project, 'con:interface', {
+        'xsi:type': 'con:RestService',  # Specify type of interface
+        'id': str(uuid.uuid4()),  # Generate a unique ID for the interface
+        'wadlVersion': "http://wadl.dev.java.net/2009/02",  # WADL version
+        'name': base_url,  # Set the name of the interface to the base URL
+        'type': 'rest'  # Specify the type of the interface
+    })
+    ET.SubElement(interface, 'con:settings')
+    ET.SubElement(interface, 'con:definitionCache', {'type': 'TEXT', 'rootPart': ''})
+
+    # Add endpoint
+    endpoints = ET.SubElement(interface, 'con:endpoints')
+    ET.SubElement(endpoints, 'con:endpoint').text = base_url
+
+    # Iterate through Postman items to create resources and methods
+    for item in postman_data['item']:
+        if 'request' in item:
+            request_name = item['name']  # Request name
+            method = item['request']['method']  # HTTP method (POST, GET, etc.)
+            path = "/" + "/".join(item['request']['url'].get('path', []))  # Request path
+            full_url = item['request']['url']['raw']  # Full URL including query parameters
+            headers = item['request']['header']  # List of headers
+            query_params = item['request']['url'].get('query', [])  # List of query parameters
+            body = item['request'].get('body', {}).get('raw', None)  # Request body, if present
+
+            # Determine the media type from headers, default to "application/json"
+            media_type = "application/json"  # Default media type
+            for header in headers:
+                if header["key"].lower() == "content-type":
+                    media_type = header["value"]
+                    break
+
+            # Determine the auth_type and extract auth details
+            auth_type = "No Authorization"
+            auth_info = item['request'].get('auth', {})
+            if auth_info:
+                if auth_info.get('type') == 'basic':
+                    auth_type = "Basic"
+                elif auth_info.get('type') == 'bearer':
+                    auth_type = "Bearer"
+                    token = extract_bearer_token(item['request'])
+                    if token:
+                        headers.append({"key": "Authorization", "value": f"Bearer {token}"})
+
+            # Add resource to the interface
+            resource = ET.SubElement(interface, 'con:resource', {
+                'name': request_name,
+                'path': path
+            })
+            ET.SubElement(resource, 'con:settings')
+
+            # Add query parameters
+            if query_params:
+                params_element = ET.SubElement(resource, 'con:parameters')
+                for param in query_params:
+                    param_element = ET.SubElement(params_element, 'con:parameter')
+                    ET.SubElement(param_element, 'con:name').text = param['key']
+                    ET.SubElement(param_element, 'con:value')
+                    ET.SubElement(param_element, 'con:style').text = 'QUERY'
+                    ET.SubElement(param_element, 'con:default')
+                    ET.SubElement(param_element, 'con:description', {'xsi:nil': 'true'})
+
+            # Add method to the resource
+            method_element = ET.SubElement(resource, 'con:method', {
+                'name': request_name,
+                'method': method
+            })
+            # Add request to the method
+            add_request(method_element, request_name, full_url, method, headers, query_params, body, media_type,
+                        auth_type, auth_info)
+
+    # Convert tree to string (for XML output)
+    tree = ET.ElementTree(soapui_project)
+    xml_str = ET.tostring(soapui_project, encoding='utf-8', method='xml').decode('utf-8')
+
+    # Print or return the generated XML for verification
+    # print(xml_str)
+    return soapui_project
+
+
+
+def save_soapui_project(soapui_project, output_file):
+    tree = ET.ElementTree(soapui_project)
+    tree.write(output_file, encoding='utf-8', xml_declaration=True)
+    print(f"Saved SoapUI project to {output_file}")
+
+
+def correct_encoding_in_file(file_path):
+    # Read the original file
+    with open(file_path, 'r', encoding='utf-8') as file:
+        xml_content = file.read()
+
+    # Replace encoded characters with their literal equivalents
+    xml_content = xml_content.replace('&gt;', '>').replace('&amp;', '&').replace("headers\"><", "headers\">&lt;")
+    # Write the corrected XML back to the file
+    with open(file_path, 'w', encoding='utf-8') as file:
+        file.write(xml_content)
+
+    print(f"Encoding corrected in file: {file_path}")
+
+
+
+# Example usage
+postman_json_file = 'C:\\Users\\postman_collection.json'
+output_soapui_file = 'C:\\Users\\soapui_project.xml'
+
+soapui_project = convert_postman_to_soapui(postman_json_file)
+save_soapui_project(soapui_project, output_soapui_file)
+
+# Example usage
+xml_file_path = output_soapui_file
+correct_encoding_in_file(xml_file_path)
